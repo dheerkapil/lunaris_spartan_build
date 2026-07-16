@@ -1,14 +1,12 @@
 name: Build Lunaris for spartan
 
 on:
-  workflow_dispatch:   # manual trigger from GitHub Actions tab
+  workflow_dispatch:   # manual trigger from Actions tab
 
 jobs:
   sync:
     name: Sync Source
     runs-on: ubuntu-latest
-    outputs:
-      cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,7 +54,7 @@ jobs:
           path: ~/aosp
           key: ${{ steps.cache-key.outputs.key }}-sync
 
-      - name: Init and sync source
+      - name: Init and sync source (if no cache hit)
         if: steps.cache-source.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/aosp
@@ -76,6 +74,11 @@ jobs:
     name: Build ROM
     needs: sync
     runs-on: ubuntu-latest
+    env:
+      WITH_GMS: true
+      WITH_GMS_COMMS_SUITE: false
+      TARGET_CUSTOM_UDFPS: true
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
