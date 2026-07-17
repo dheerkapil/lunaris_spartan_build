@@ -1,166 +1,66 @@
-name: Build Lunaris for spartan
+- name: Setup, validate, and sync AOSP
+  run: |
+    set -e
 
-on:
-  workflow_dispatch:
+    # 1. Initialize repo
+    mkdir -p ~/aosp
+    cd ~/aosp
+    repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
 
-jobs:
-  sync:
-    name: Sync Source
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # 2. Prepare local manifests directory
+    mkdir -p .repo/local_manifests
 
-      - name: Maximize disk space
-        run: |
-          # Remove everything non‑essential for an AOSP build
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /opt/microsoft
-          sudo rm -rf /opt/pipx
-          # Remove large apt packages if present
-          sudo apt-get purge -y '^ghc.*' '^llvm.*' '^mono.*' '^php.*' '^postgresql.*' '^temurin.*' '^zulu.*' '^dotnet.*' '^mysql.*' '^oracle.*' 2>/dev/null || true
-          sudo apt-get autoremove -y && sudo apt-get clean
-          # Remove docker images (not needed)
-          sudo docker system prune -af 2>/dev/null || true
-          # Report available space
-          df -h /
+    # 3. Copy the user's manifest (if it exists)
+    if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
+      cp "$GITHUB_WORKSPACE/local_manifest.xml" .repo/local_manifests/
+    else
+      echo "⚠️  No local_manifest.xml found – creating a default one."
+      cat > .repo/local_manifests/local_manifest.xml <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <manifest>
+      <!-- Add your own project overrides here -->
+    </manifest>
+    EOF
+    fi
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y openjdk-11-jdk-headless git-core gnupg flex bison \
-            gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib \
-            libc6-dev-i386 libncurses5-dev libssl-dev liblz4-tool x11proto-core-dev \
-            libx11-dev libgl1-mesa-dev xsltproc unzip python-is-python3 imagemagick \
-            pngcrush rsync bc libxml2-utils
+    MANIFEST=".repo/local_manifests/local_manifest.xml"
 
-      - name: Set up repo tool
-        run: |
-          mkdir -p ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
+    # 4. Install tools (xmllint, dos2unix) – they are usually present but ensure they are
+    sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils dos2unix
 
-      - name: Configure git
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
+    # 5. Fix common encoding issues: remove BOM, convert CRLF -> LF
+    dos2unix "$MANIFEST" 2>/dev/null || true
+    sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
 
-      - name: Generate cache key
-        id: cache-key
-        run: |
-          echo "key=lunaris-16.2-$(md5sum $GITHUB_WORKSPACE/local_manifest.xml | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+    # 6. Validate XML; if invalid, try to fix it automatically
+    if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
+      echo "❌ Invalid XML – attempting to repair..."
 
-      - name: Cache Android source
-        id: cache-source
-        uses: actions/cache@v4
-        with:
-          path: ~/aosp
-          key: ${{ steps.cache-key.outputs.key }}-sync
+      # If root <manifest> is missing, add it
+      if ! grep -q "<manifest" "$MANIFEST"; then
+        echo "   Adding missing <manifest> root."
+        sed -i '1i<?xml version="1.0" encoding="UTF-8"?>\n<manifest>' "$MANIFEST"
+        echo "</manifest>" >> "$MANIFEST"
+      fi
 
-      - name: Init and sync source (if no cache hit)
-        if: steps.cache-source.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/aosp
-          cd ~/aosp
-          repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
-          mkdir -p .repo/local_manifests
-          cp $GITHUB_WORKSPACE/local_manifest.xml .repo/local_manifests/
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+      # Escape unescaped ampersands (simple but helps)
+      sed -i 's/&\([^a-zA-Z#]\|$\)/\&amp;\1/g' "$MANIFEST"
 
-      - name: Update source (if cache existed)
-        if: steps.cache-source.outputs.cache-hit == 'true'
-        run: |
-          cd ~/aosp
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+      # Re‑validate
+      if xmllint --noout "$MANIFEST" 2>/dev/null; then
+        echo "✅ Repaired successfully."
+      else
+        echo "⚠️  Still invalid – falling back to a minimal valid manifest."
+        cat > "$MANIFEST" <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <manifest>
+      <project name="Lunaris-AOSP/android" path="." revision="16.2" />
+    </manifest>
+    EOF
+      fi
+    else
+      echo "✅ local_manifest.xml is valid."
+    fi
 
-  build:
-    name: Build ROM
-    needs: sync
-    runs-on: ubuntu-latest
-    env:
-      WITH_GMS: true
-      WITH_GMS_COMMS_SUITE: false
-      TARGET_CUSTOM_UDFPS: true
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Maximize disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /opt/microsoft
-          sudo rm -rf /opt/pipx
-          sudo apt-get purge -y '^ghc.*' '^llvm.*' '^mono.*' '^php.*' '^postgresql.*' '^temurin.*' '^zulu.*' '^dotnet.*' '^mysql.*' '^oracle.*' 2>/dev/null || true
-          sudo apt-get autoremove -y && sudo apt-get clean
-          sudo docker system prune -af 2>/dev/null || true
-          df -h /
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y openjdk-11-jdk-headless git-core gnupg flex bison \
-            gperf build-essential zip curl zlib1g-dev gcc-multilib g++-multilib \
-            libc6-dev-i386 libncurses5-dev libssl-dev liblz4-tool x11proto-core-dev \
-            libx11-dev libgl1-mesa-dev xsltproc unzip python-is-python3 imagemagick \
-            pngcrush rsync bc libxml2-utils
-
-      - name: Set up repo tool
-        run: |
-          mkdir -p ~/bin
-          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-          chmod a+x ~/bin/repo
-          echo "$HOME/bin" >> $GITHUB_PATH
-
-      - name: Configure git
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-
-      - name: Generate cache key
-        id: cache-key
-        run: |
-          echo "key=lunaris-16.2-$(md5sum $GITHUB_WORKSPACE/local_manifest.xml | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
-
-      - name: Restore cached source
-        uses: actions/cache@v4
-        with:
-          path: ~/aosp
-          key: ${{ steps.cache-key.outputs.key }}-sync
-
-      - name: Quick sync (update if needed)
-        run: |
-          cd ~/aosp
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
-
-      - name: Set up build environment and lunch
-        run: |
-          cd ~/aosp
-          . build/envsetup.sh
-          lunch lineage_spartan-userdebug
-
-      - name: Build ROM
-        run: |
-          cd ~/aosp
-          make bacon -j$(nproc --all)
-
-      - name: Upload ROM artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Lunaris-spartan-${{ github.run_id }}
-          path: ~/aosp/out/target/product/spartan/*.zip
+    # 7. Finally, sync
+    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
