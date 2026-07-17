@@ -1,59 +1,63 @@
-- name: Setup and sync AOSP
-  run: |
-    set -e
-    mkdir -p ~/aosp
-    cd ~/aosp
-    repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
+name: Build AOSP
 
-    mkdir -p .repo/local_manifests
+on:
+  push:
+    branches: [ main ]
+  pull_request:
 
-    # Copy manifest if it exists, otherwise create a default one
-    if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
-      cp "$GITHUB_WORKSPACE/local_manifest.xml" .repo/local_manifests/
-    else
-      echo "No local_manifest.xml found – creating a minimal one."
-      cat > .repo/local_manifests/local_manifest.xml <<'EOF'
-    <?xml version="1.0" encoding="UTF-8"?>
-    <manifest>
-      <!-- Add your projects here -->
-    </manifest>
-    EOF
-    fi
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    MANIFEST=".repo/local_manifests/local_manifest.xml"
+      - name: Setup and sync AOSP
+        run: |
+          set -e
+          mkdir -p ~/aosp
+          cd ~/aosp
+          repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
 
-    # Fix Byte Order Mark (BOM) and Windows line endings
-    sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
-    sed -i 's/\r$//' "$MANIFEST"          # remove CR
+          mkdir -p .repo/local_manifests
 
-    # Validate XML – if invalid, try to repair
-    if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
-      echo "❌ Invalid XML – attempting automatic repair..."
+          # Copy manifest if it exists, otherwise create a default one
+          if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
+            cp "$GITHUB_WORKSPACE/local_manifest.xml" .repo/local_manifests/
+          else
+            echo "No local_manifest.xml found – creating a minimal one."
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <!-- Add your projects here -->\n</manifest>\n' > .repo/local_manifests/local_manifest.xml
+          fi
 
-      # If root <manifest> is missing, add it
-      if ! grep -q "<manifest" "$MANIFEST"; then
-        sed -i '1i<?xml version="1.0" encoding="UTF-8"?>\n<manifest>' "$MANIFEST"
-        echo "</manifest>" >> "$MANIFEST"
-      fi
+          MANIFEST=".repo/local_manifests/local_manifest.xml"
 
-      # Escape unescaped ampersands
-      sed -i 's/&\([^a-zA-Z#]\|$\)/\&amp;\1/g' "$MANIFEST"
+          # Fix Byte Order Mark (BOM) and Windows line endings
+          sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
+          sed -i 's/\r$//' "$MANIFEST"
 
-      # Re-validate
-      if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
-        echo "⚠️  Still invalid – using a safe fallback manifest."
-        cat > "$MANIFEST" <<'EOF'
-    <?xml version="1.0" encoding="UTF-8"?>
-    <manifest>
-      <project name="Lunaris-AOSP/android" path="." revision="16.2" />
-    </manifest>
-    EOF
-      else
-        echo "✅ Repaired successfully."
-      fi
-    else
-      echo "✅ Manifest is valid."
-    fi
+          # Validate XML – if invalid, try to repair
+          if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
+            echo "❌ Invalid XML – attempting automatic repair..."
 
-    # Now sync
-    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+            # If root <manifest> is missing, add it
+            if ! grep -q "<manifest" "$MANIFEST"; then
+              sed -i '1i<?xml version="1.0" encoding="UTF-8"?>\n<manifest>' "$MANIFEST"
+              echo "</manifest>" >> "$MANIFEST"
+            fi
+
+            # Escape unescaped ampersands
+            sed -i 's/&\([^a-zA-Z#]\|$\)/\&amp;\1/g' "$MANIFEST"
+
+            # Re-validate
+            if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
+              echo "⚠️  Still invalid – using a safe fallback manifest."
+              printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <project name="Lunaris-AOSP/android" path="." revision="16.2" />\n</manifest>\n' > "$MANIFEST"
+            else
+              echo "✅ Repaired successfully."
+            fi
+          else
+            echo "✅ Manifest is valid."
+          fi
+
+          # Now sync
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
