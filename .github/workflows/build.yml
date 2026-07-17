@@ -1,66 +1,59 @@
-- name: Setup, validate, and sync AOSP
+- name: Setup and sync AOSP
   run: |
     set -e
-
-    # 1. Initialize repo
     mkdir -p ~/aosp
     cd ~/aosp
     repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
 
-    # 2. Prepare local manifests directory
     mkdir -p .repo/local_manifests
 
-    # 3. Copy the user's manifest (if it exists)
+    # Copy manifest if it exists, otherwise create a default one
     if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
       cp "$GITHUB_WORKSPACE/local_manifest.xml" .repo/local_manifests/
     else
-      echo "⚠️  No local_manifest.xml found – creating a default one."
+      echo "No local_manifest.xml found – creating a minimal one."
       cat > .repo/local_manifests/local_manifest.xml <<'EOF'
     <?xml version="1.0" encoding="UTF-8"?>
     <manifest>
-      <!-- Add your own project overrides here -->
+      <!-- Add your projects here -->
     </manifest>
     EOF
     fi
 
     MANIFEST=".repo/local_manifests/local_manifest.xml"
 
-    # 4. Install tools (xmllint, dos2unix) – they are usually present but ensure they are
-    sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils dos2unix
-
-    # 5. Fix common encoding issues: remove BOM, convert CRLF -> LF
-    dos2unix "$MANIFEST" 2>/dev/null || true
+    # Fix Byte Order Mark (BOM) and Windows line endings
     sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
+    sed -i 's/\r$//' "$MANIFEST"          # remove CR
 
-    # 6. Validate XML; if invalid, try to fix it automatically
+    # Validate XML – if invalid, try to repair
     if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
-      echo "❌ Invalid XML – attempting to repair..."
+      echo "❌ Invalid XML – attempting automatic repair..."
 
       # If root <manifest> is missing, add it
       if ! grep -q "<manifest" "$MANIFEST"; then
-        echo "   Adding missing <manifest> root."
         sed -i '1i<?xml version="1.0" encoding="UTF-8"?>\n<manifest>' "$MANIFEST"
         echo "</manifest>" >> "$MANIFEST"
       fi
 
-      # Escape unescaped ampersands (simple but helps)
+      # Escape unescaped ampersands
       sed -i 's/&\([^a-zA-Z#]\|$\)/\&amp;\1/g' "$MANIFEST"
 
-      # Re‑validate
-      if xmllint --noout "$MANIFEST" 2>/dev/null; then
-        echo "✅ Repaired successfully."
-      else
-        echo "⚠️  Still invalid – falling back to a minimal valid manifest."
+      # Re-validate
+      if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
+        echo "⚠️  Still invalid – using a safe fallback manifest."
         cat > "$MANIFEST" <<'EOF'
     <?xml version="1.0" encoding="UTF-8"?>
     <manifest>
       <project name="Lunaris-AOSP/android" path="." revision="16.2" />
     </manifest>
     EOF
+      else
+        echo "✅ Repaired successfully."
       fi
     else
-      echo "✅ local_manifest.xml is valid."
+      echo "✅ Manifest is valid."
     fi
 
-    # 7. Finally, sync
+    # Now sync
     repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
