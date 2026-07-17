@@ -1,63 +1,53 @@
-name: Build AOSP
+- name: Setup and sync AOSP
+  run: |
+    set -ex  # verbose output for debugging
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
+    mkdir -p ~/aosp
+    cd ~/aosp
+    repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+    mkdir -p .repo/local_manifests
+    MANIFEST=".repo/local_manifests/local_manifest.xml"
 
-      - name: Setup and sync AOSP
-        run: |
-          set -e
-          mkdir -p ~/aosp
-          cd ~/aosp
-          repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
+    # ----- Copy user manifest if it exists -----
+    if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
+      cp "$GITHUB_WORKSPACE/local_manifest.xml" "$MANIFEST"
+      echo "📁 Copied user manifest"
+    else
+      echo "⚠️  No local_manifest.xml in workspace – will create a default one."
+    fi
 
-          mkdir -p .repo/local_manifests
+    # ----- Show what we have (for debugging) -----
+    echo "--- Content of $MANIFEST ---"
+    cat "$MANIFEST" 2>/dev/null || echo "(file missing)"
+    echo "--- End of content ---"
 
-          # Copy manifest if it exists, otherwise create a default one
-          if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
-            cp "$GITHUB_WORKSPACE/local_manifest.xml" .repo/local_manifests/
-          else
-            echo "No local_manifest.xml found – creating a minimal one."
-            printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <!-- Add your projects here -->\n</manifest>\n' > .repo/local_manifests/local_manifest.xml
-          fi
+    # ----- Fix common encoding issues -----
+    sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST" 2>/dev/null || true
+    sed -i 's/\r$//' "$MANIFEST" 2>/dev/null || true
 
-          MANIFEST=".repo/local_manifests/local_manifest.xml"
+    # ----- Validate with xmllint (install if missing) -----
+    sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils 2>/dev/null
 
-          # Fix Byte Order Mark (BOM) and Windows line endings
-          sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
-          sed -i 's/\r$//' "$MANIFEST"
+    if xmllint --noout "$MANIFEST" 2>/dev/null; then
+      echo "✅ Manifest is valid – keeping it."
+    else
+      echo "❌ Manifest is INVALID. Replacing with a working manifest."
+      # Fallback: include the main project and (optionally) any others you need
+      cat > "$MANIFEST" <<'EOF'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <manifest>
+      <project name="Lunaris-AOSP/android" path="." revision="16.2" />
+      <!-- Add your extra projects here if needed -->
+    </manifest>
+    EOF
+      echo "🔄 Replaced with a safe manifest."
+    fi
 
-          # Validate XML – if invalid, try to repair
-          if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
-            echo "❌ Invalid XML – attempting automatic repair..."
+    # ----- Final check before sync -----
+    echo "--- Final manifest content ---"
+    cat "$MANIFEST"
+    echo "-------------------------------"
 
-            # If root <manifest> is missing, add it
-            if ! grep -q "<manifest" "$MANIFEST"; then
-              sed -i '1i<?xml version="1.0" encoding="UTF-8"?>\n<manifest>' "$MANIFEST"
-              echo "</manifest>" >> "$MANIFEST"
-            fi
-
-            # Escape unescaped ampersands
-            sed -i 's/&\([^a-zA-Z#]\|$\)/\&amp;\1/g' "$MANIFEST"
-
-            # Re-validate
-            if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
-              echo "⚠️  Still invalid – using a safe fallback manifest."
-              printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <project name="Lunaris-AOSP/android" path="." revision="16.2" />\n</manifest>\n' > "$MANIFEST"
-            else
-              echo "✅ Repaired successfully."
-            fi
-          else
-            echo "✅ Manifest is valid."
-          fi
-
-          # Now sync
-          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+    # ----- Now sync -----
+    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
