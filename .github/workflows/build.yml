@@ -1,53 +1,53 @@
-- name: Setup and sync AOSP
-  run: |
-    set -ex  # verbose output for debugging
+name: Build AOSP
 
-    mkdir -p ~/aosp
-    cd ~/aosp
-    repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
+on:
+  push:
+    branches: [ main ]
+  pull_request:
 
-    mkdir -p .repo/local_manifests
-    MANIFEST=".repo/local_manifests/local_manifest.xml"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    # ----- Copy user manifest if it exists -----
-    if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
-      cp "$GITHUB_WORKSPACE/local_manifest.xml" "$MANIFEST"
-      echo "📁 Copied user manifest"
-    else
-      echo "⚠️  No local_manifest.xml in workspace – will create a default one."
-    fi
+      - name: Setup and sync AOSP
+        run: |
+          set -ex
+          mkdir -p ~/aosp
+          cd ~/aosp
+          repo init -u https://github.com/Lunaris-AOSP/android -b 16.2 --git-lfs
+          mkdir -p .repo/local_manifests
+          MANIFEST=".repo/local_manifests/local_manifest.xml"
 
-    # ----- Show what we have (for debugging) -----
-    echo "--- Content of $MANIFEST ---"
-    cat "$MANIFEST" 2>/dev/null || echo "(file missing)"
-    echo "--- End of content ---"
+          if [ -f "$GITHUB_WORKSPACE/local_manifest.xml" ]; then
+            cp "$GITHUB_WORKSPACE/local_manifest.xml" "$MANIFEST"
+            echo "📁 Copied user manifest"
+          else
+            echo "⚠️  No user manifest – creating default"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <project name="Lunaris-AOSP/android" path="." revision="16.2" />\n</manifest>\n' > "$MANIFEST"
+          fi
 
-    # ----- Fix common encoding issues -----
-    sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST" 2>/dev/null || true
-    sed -i 's/\r$//' "$MANIFEST" 2>/dev/null || true
+          # Remove BOM and CRLF
+          sed -i '1s/^\xEF\xBB\xBF//' "$MANIFEST"
+          sed -i 's/\r$//' "$MANIFEST"
 
-    # ----- Validate with xmllint (install if missing) -----
-    sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils 2>/dev/null
+          # Install xmllint (already installed, but safe)
+          sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils
 
-    if xmllint --noout "$MANIFEST" 2>/dev/null; then
-      echo "✅ Manifest is valid – keeping it."
-    else
-      echo "❌ Manifest is INVALID. Replacing with a working manifest."
-      # Fallback: include the main project and (optionally) any others you need
-      cat > "$MANIFEST" <<'EOF'
-    <?xml version="1.0" encoding="UTF-8"?>
-    <manifest>
-      <project name="Lunaris-AOSP/android" path="." revision="16.2" />
-      <!-- Add your extra projects here if needed -->
-    </manifest>
-    EOF
-      echo "🔄 Replaced with a safe manifest."
-    fi
+          # Validate; if invalid, replace with a working one
+          if ! xmllint --noout "$MANIFEST" 2>/dev/null; then
+            echo "❌ Manifest invalid – replacing with safe version"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<manifest>\n  <project name="Lunaris-AOSP/android" path="." revision="16.2" />\n</manifest>\n' > "$MANIFEST"
+          else
+            echo "✅ Manifest is valid"
+          fi
 
-    # ----- Final check before sync -----
-    echo "--- Final manifest content ---"
-    cat "$MANIFEST"
-    echo "-------------------------------"
+          # Show final manifest (for debugging)
+          echo "--- Final manifest ---"
+          cat "$MANIFEST"
+          echo "----------------------"
 
-    # ----- Now sync -----
-    repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+          # Sync
+          repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
